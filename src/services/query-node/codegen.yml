@@ -1,6 +1,6 @@
 overwrite: true
 
-schema: https://18.195.31.204.nip.io/query-node/server/graphql
+schema: './src/services/query-node/schema.graphql'
 
 documents:
   - './src/services/query-node/queries/*.graphql'

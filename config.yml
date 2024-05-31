@@ -1,8 +1,24 @@
 endpoints:
   queryNode: http://localhost:8080/graphql
   joystreamNodeWs: ws://localhost:9944
-directories:
-  assets: ./local/data
+  redis:
+    host: localhost
+    port: 6379
+sync:
+  enable: true
+  downloadsDir: ./local/data
+  intervals: # in minutes
+    youtubePolling: 30
+    contentProcessing: 1
+  limits:
+    dailyApiQuota:
+      sync: 9500
+      signup: 500
+    maxConcurrentDownloads: 50
+    maxConcurrentUploads: 50
+    createVideoTxBatchSize: 10
+    pendingDownloadTimeoutSec: 600 # 10 mins
+    storage: 100G
 logs:
   file:
     level: debug
@@ -12,37 +28,35 @@ logs:
   console:
     level: verbose
   # elastic:
-  #   level: info
+  #   level: http
   #   endpoint: http://localhost:9200
-intervals: # in minutes
-  youtubePolling: 30
-  contentProcessing: 1
+  #   auth:
+  #     username: elastic-username
+  #     password: elastic-password
 youtube:
   clientId: google-client-id
   clientSecret: google-client-secret
+  # adcKeyFilePath: path/to/adc-key-file.json
+  # maxAllowedQuotaUsageInPercentage: 95
+proxy:
+  url: socks5://chisel-client:1080
+  chiselProxy:
+    ec2AutoRotateIp: false
 aws:
   endpoint: http://localhost:4566
   region: us-east-1
   credentials:
     accessKeyId: access-key-id
     secretAccessKey: secret-access-key
-limits:
-  # Total daily Youtube quota is 10,000 which is shared between signup(5%) and sync(98%) services
-  dailyApiQuota:
-    sync: 9500
-    signup: 500
-  # How many videos should be concurrently downloaded from Youtube to be prepared for upload to Joystream
-  maxConcurrentDownloads: 50
-  # Max no. of videos that should be concurrently uploaded to Joystream's storage node
-  maxConcurrentUploads: 50
-  storage: 100G
 httpApi:
   port: 3001
   ownerKey: ypp-owner-key
 joystream:
+  faucet:
+    endpoint: http://localhost:3002/register
+    captchaBypassKey: some-random-key
   app:
     name: app-name
-    # App auth key used for signing App Actions
     accountSeed: 'example_string_seed'
   channelCollaborator:
     memberId: collaborator-member-id
@@ -50,12 +64,17 @@ joystream:
       - mnemonic: 'escape naive annual throw tragic achieve grunt verify cram note harvest problem'
       # - suri: //Alice
 creatorOnboardingRequirements:
-  minimumSubscribersCount: 1
-  minimumVideoCount: 2
-  minimumVideoAgeHours: 1
-  minimumChannelAgeHours: 1
   # ! Production values
-  # minimumSubscribersCount: 50
-  # minimumVideoCount: 10
-  # minimumVideoAgeHours: 720 # (24 hours x 30 days) 1 month
-  # minimumChannelAgeHours: 2160 # (3 x 24 hours x 30 days) 3 months
+  minimumSubscribersCount: 50
+  minimumVideosCount: 10
+  minimumVideoAgeHours: 720 # (24 hours x 30 days) 1 month
+  minimumChannelAgeHours: 2160 # (3 x 24 hours x 30 days) 3 months
+  minimumVideosPerMonth: 1
+  monthsToConsider: 1
+  # ! Development values
+  # minimumSubscribersCount: 1
+  # minimumVideosCount: 1
+  # minimumVideoAgeHours: 1
+  # minimumChannelAgeHours: 1
+  # minimumVideosPerMonth: 1
+  # monthsToConsider: 1

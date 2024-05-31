@@ -2,10 +2,10 @@ import AsyncLock from 'async-lock'
 import * as dynamoose from 'dynamoose'
 import { ConditionInitializer } from 'dynamoose/dist/Condition'
 import { AnyItem } from 'dynamoose/dist/Item'
-import { Query, Scan } from 'dynamoose/dist/ItemRetriever'
+import { Query, QueryResponse, Scan, ScanResponse } from 'dynamoose/dist/ItemRetriever'
 import { omit } from 'ramda'
 import { DYNAMO_MODEL_OPTIONS, IRepository, mapTo } from '.'
-import { ResourcePrefix, VideoState, videoStates, YtVideo } from '../types/youtube'
+import { ResourcePrefix, VideoState, YtVideo, videoStates } from '../types/youtube'
 
 function videoRepository(tablePrefix: ResourcePrefix) {
   const videoSchema = new dynamoose.Schema(
@@ -34,8 +34,6 @@ function videoRepository(tablePrefix: ResourcePrefix) {
       // Video's playlist ID
       playlistId: String,
 
-      resourceId: String,
-
       viewCount: Number,
 
       thumbnails: {
@@ -55,8 +53,8 @@ function videoRepository(tablePrefix: ResourcePrefix) {
         enum: videoStates,
         index: {
           type: 'global',
-          rangeKey: 'updatedAt',
-          name: 'state-updatedAt-index',
+          rangeKey: 'publishedAt',
+          name: 'state-publishedAt-index',
         },
       },
 
@@ -81,9 +79,6 @@ function videoRepository(tablePrefix: ResourcePrefix) {
       // Video's container
       container: String,
 
-      // Indicates if the video is an upcoming/active live broadcast. else it's "none"
-      liveBroadcastContent: String,
-
       // joystream video ID in `VideoCreated` event response, returned from joystream runtime after creating a video
       joystreamVideo: {
         type: Object,
@@ -100,8 +95,8 @@ function videoRepository(tablePrefix: ResourcePrefix) {
         },
       },
 
-      // ID of the corresponding Joystream Channel (De-normalized from Channel table)
-      joystreamChannelId: Number,
+      // Whether video is a short format, vertical video (e.g. Youtube Shorts, TikTok, Instagram Reels)
+      isShort: Boolean,
 
       // Video creation date on youtube
       publishedAt: String,
@@ -140,7 +135,7 @@ export class VideosRepository implements IRepository<YtVideo> {
 
   // lock any updates on video table
   private readonly ASYNC_LOCK_ID = 'video'
-  private asyncLock: AsyncLock = new AsyncLock()
+  private asyncLock: AsyncLock = new AsyncLock({ maxPending: Number.MAX_SAFE_INTEGER })
 
   constructor(tablePrefix: ResourcePrefix) {
     this.model = videoRepository(tablePrefix)
@@ -157,8 +152,17 @@ export class VideosRepository implements IRepository<YtVideo> {
 
   async scan(init: ConditionInitializer, f: (q: Scan<AnyItem>) => Scan<AnyItem>): Promise<YtVideo[]> {
     return this.asyncLock.acquire(this.ASYNC_LOCK_ID, async () => {
-      const results = await f(this.model.scan(init)).exec()
-      return results.map((r) => mapTo<YtVideo>(r))
+      let lastKey = undefined
+      const results = []
+      do {
+        let scannedBatch: ScanResponse<AnyItem> = await f(this.model.scan(init))
+          .startAt(lastKey as any)
+          .exec()
+        let batchResult = scannedBatch.map((b) => mapTo<YtVideo>(b))
+        results.push(...batchResult)
+        lastKey = scannedBatch.lastKey
+      } while (lastKey)
+      return results
     })
   }
 
@@ -183,6 +187,20 @@ export class VideosRepository implements IRepository<YtVideo> {
     })
   }
 
+  async batchSave(videos: YtVideo[]): Promise<void> {
+    if (!videos.length) {
+      return
+    }
+
+    return this.asyncLock.acquire(this.ASYNC_LOCK_ID, async () => {
+      const updateTransactions = videos.map((video) => {
+        const upd = omit(['id', 'channelId', 'updatedAt'], video)
+        return this.model.transaction.update({ channelId: video.channelId, id: video.id }, upd)
+      })
+      return dynamoose.transaction(updateTransactions)
+    })
+  }
+
   async delete(partition: string, id: string): Promise<void> {
     return this.asyncLock.acquire(this.ASYNC_LOCK_ID, async () => {
       await this.model.delete({ id, channelId: partition })
@@ -191,15 +209,24 @@ export class VideosRepository implements IRepository<YtVideo> {
 
   async query(init: ConditionInitializer, f: (q: Query<AnyItem>) => Query<AnyItem>): Promise<YtVideo[]> {
     return this.asyncLock.acquire(this.ASYNC_LOCK_ID, async () => {
-      const results = await f(this.model.query(init)).exec()
-      return results.map((r) => mapTo<YtVideo>(r))
+      let lastKey = undefined
+      const results = []
+      do {
+        let queriedBatch: QueryResponse<AnyItem> = await f(this.model.query(init))
+          .startAt(lastKey as any)
+          .exec()
+        let batchResult = queriedBatch.map((b) => mapTo<YtVideo>(b))
+        results.push(...batchResult)
+        lastKey = queriedBatch.lastKey
+      } while (lastKey)
+      return results
     })
   }
 
   async count(init: ConditionInitializer, f: (q: Query<AnyItem>) => Query<AnyItem>): Promise<YtVideo[]> {
     return this.asyncLock.acquire(this.ASYNC_LOCK_ID, async () => {
-      const results = await f(this.model.query(init)).exec()
-      return results.map((r) => mapTo<YtVideo>(r))
+      const results = await this.query(init, f)
+      return results
     })
   }
 }
@@ -215,18 +242,16 @@ export class VideosService {
     return await this.videosRepository.save({ ...video, state })
   }
 
-  async getCountByChannel(channelId: string) {
-    const videosCountByChannel = (await (await this.videosRepository.getModel())
-      .query('channelId')
-      .eq(channelId)
-      .count()
-      .exec()) as unknown as { count: string }
-
-    return parseInt(videosCountByChannel.count)
+  /**
+   * @param video
+   * @returns Updated video
+   */
+  async batchUpdateState(videos: YtVideo[], state: VideoState): Promise<void> {
+    return await this.videosRepository.batchSave(videos.map((v) => ({ ...v, state })))
   }
 
   async getVideosInState(state: VideoState): Promise<YtVideo[]> {
-    return this.videosRepository.query({ state }, (q) => q.sort('ascending').using('state-updatedAt-index'))
+    return this.videosRepository.query({ state }, (q) => q.sort('ascending').using('state-publishedAt-index'))
   }
 
   async getAllUnsyncedVideos(): Promise<YtVideo[]> {
@@ -234,15 +259,20 @@ export class VideosService {
       ...(await this.getVideosInState('New')),
       ...(await this.getVideosInState('VideoCreationFailed')),
       ...(await this.getVideosInState('UploadFailed')),
+      ...(await this.getVideosInState('VideoCreated')),
     ]
   }
 
-  async getAllVideosInPendingUploadState(limit: number): Promise<YtVideo[]> {
+  async getVideosPendingUpload(limit: number): Promise<YtVideo[]> {
     // only handle upload for videos that has been created or upload failed previously
     return [...(await this.getVideosInState('UploadFailed')), ...(await this.getVideosInState('VideoCreated'))].slice(
       0,
       limit
     )
+  }
+
+  async getVideosPendingOnchainCreation(): Promise<YtVideo[]> {
+    return [...(await this.getVideosInState('VideoCreationFailed')), ...(await this.getVideosInState('New'))]
   }
 
   /**

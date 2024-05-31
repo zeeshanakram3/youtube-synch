@@ -104,7 +104,7 @@ export default class AddUnauthorizedChannelForSyncing extends RuntimeApiCommandB
 
     // Ensure Youtube Channel is not already being synced.
     try {
-      const ytCh = await dynamo.channels.getByChannelId(ytChannel.author.channelID)
+      const ytCh = await dynamo.channels.getById(ytChannel.author.channelID)
       if (ytCh.performUnauthorizedSync) {
         await this.requireConfirmation(
           'This youtube channel is already being synced. Do you want to redo the syncing?',
@@ -140,7 +140,7 @@ export default class AddUnauthorizedChannelForSyncing extends RuntimeApiCommandB
         })
       }
       try {
-        const { title } = await dynamo.channels.getByJoystreamChannelId(joystreamChannelId)
+        const { title } = await dynamo.channels.getByJoystreamId(joystreamChannelId)
         // Allow to re-sync the same JS channel with the same YT channel
         if (title !== ytChannel.author.name) {
           throw new CLIError(
@@ -191,11 +191,9 @@ export default class AddUnauthorizedChannelForSyncing extends RuntimeApiCommandB
         thumbnails: { default: video.thumbnails[0]?.url, medium: video.thumbnails[1]?.url } as Thumbnails,
         duration: video.durationSec || 0,
         createdAt: new Date(),
-        resourceId: video.id,
         url: video.shortUrl,
         privacyStatus: 'public',
         uploadStatus: 'processed',
-        joystreamChannelId: c.joystreamChannelId,
         liveBroadcastContent: video.isLive ? 'live' : 'none',
         state: 'New',
         viewCount: 0,

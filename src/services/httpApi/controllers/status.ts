@@ -5,7 +5,8 @@ import { DynamodbService } from '../../../repository'
 import { ReadonlyConfig } from '../../../types'
 import { Stats } from '../../../types/youtube'
 import { RuntimeApi } from '../../runtime/api'
-import { CollaboratorStatusDto } from '../dtos'
+import { ContentProcessingClient } from '../../syncProcessing'
+import { CollaboratorStatusDto, StatusDto } from '../dtos'
 
 @Controller('status')
 @ApiTags('status')
@@ -13,8 +14,28 @@ export class StatusController {
   constructor(
     private dynamodbService: DynamodbService,
     private runtimeApi: RuntimeApi,
+    private contentProcessingClient: ContentProcessingClient,
     @Inject('config') private config: ReadonlyConfig
   ) {}
+
+  @Get()
+  @ApiResponse({ type: StatusDto })
+  @ApiOperation({ description: `Get status info of YT-Synch service` })
+  async getStatus(): Promise<StatusDto> {
+    try {
+      // Get complete quota usage stats
+      const {
+        version,
+        sync: { enable },
+      } = this.config
+
+      const { totalCount: syncBacklog } = await this.contentProcessingClient.getJobsCount()
+      return { version, syncStatus: enable ? 'enabled' : 'disabled', syncBacklog }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : error
+      throw new NotFoundException(message)
+    }
+  }
 
   @Get('quota-usage')
   @ApiResponse({ type: Stats, isArray: true })
@@ -45,7 +66,7 @@ export class StatusController {
 
   @Get('collaborator')
   @ApiResponse({ type: Stats })
-  @ApiOperation({ description: `Get youtube quota usage information for today` })
+  @ApiOperation({ description: `Get Joystream collaborator account info` })
   async getCollaboratorStatus(): Promise<CollaboratorStatusDto> {
     const ONE_JOY = new BN(10_000_000_000)
     try {

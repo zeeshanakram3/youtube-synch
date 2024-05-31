@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Inject,
@@ -17,38 +18,45 @@ import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger'
 import { signatureVerify } from '@polkadot/util-crypto'
 import { randomBytes } from 'crypto'
 import { DynamodbService } from '../../../repository'
-import { YtChannel, YtUser, YtVideo } from '../../../types/youtube'
+import { ReadonlyConfig } from '../../../types'
+import { YtChannel, YtUser } from '../../../types/youtube'
 import { QueryNodeApi } from '../../query-node/api'
+import { ContentProcessingClient } from '../../syncProcessing'
+import { YoutubePollingService } from '../../syncProcessing/YoutubePollingService'
 import { IYoutubeApi } from '../../youtube/api'
 import {
   ChannelDto,
   ChannelInductionRequirementsDto,
   IngestChannelDto,
   OptoutChannelDto,
+  ReferredChannelDto,
   SaveChannelRequest,
   SaveChannelResponse,
+  SetChannelCategoryByOperatorDto,
+  SetOperatorIngestionStatusDto,
   SuspendChannelDto,
+  UpdateChannelCategoryDto,
   UserDto,
   VerifyChannelDto,
-  VideoDto,
+  WhitelistChannelDto,
 } from '../dtos'
 
 @Controller('channels')
 @ApiTags('channels')
 export class ChannelsController {
   constructor(
+    @Inject('config') private config: ReadonlyConfig,
     @Inject('youtube') private youtubeApi: IYoutubeApi,
     private qnApi: QueryNodeApi,
-    private dynamodbService: DynamodbService
+    private dynamodbService: DynamodbService,
+    private youtubePollingService: YoutubePollingService,
+    private contentProcessingClient: ContentProcessingClient
   ) {}
 
-  @ApiOperation({
-    description: `Creates user from the supplied google authorization code and fetches
-     user's channel and if it satisfies YPP induction criteria it saves the record`,
-  })
+  @Post()
   @ApiBody({ type: SaveChannelRequest })
   @ApiResponse({ type: SaveChannelResponse })
-  @Post()
+  @ApiOperation({ description: `Saves channel record of a YPP verified user` })
   async saveChannel(@Body() channelInfo: SaveChannelRequest): Promise<SaveChannelResponse> {
     try {
       const {
@@ -60,6 +68,10 @@ export class ChannelsController {
         videoCategoryId,
         referrerChannelId,
       } = channelInfo
+
+      /**
+       *  Input Validation
+       */
 
       if (referrerChannelId === joystreamChannelId) {
         throw new Error('Referrer channel cannot be the same as the channel being verified.')
@@ -73,17 +85,42 @@ export class ChannelsController {
         throw new Error('Invalid request author. Permission denied.')
       }
 
+      // ensure that Joystream channel exists
+      const jsChannel = await this.qnApi.getChannelById(joystreamChannelId.toString())
+      if (!jsChannel) {
+        throw new Error(`Joystream Channel ${joystreamChannelId} does not exist.`)
+      }
+
+      // ensure that Joystream channel isn't associated with any other participant channel
+      const existingJsChannel = await this.dynamodbService.channels.findPartnerChannelByJoystreamId(joystreamChannelId)
+      if (existingJsChannel) {
+        throw new Error(
+          `Joystream Channel ${joystreamChannelId} already connected with Youtube Channel ${existingJsChannel.id}.`
+        )
+      }
+
       // get channel from user
-      const channel = await this.youtubeApi.getChannel(user)
+      let channel = await this.youtubeApi.getChannel(user)
+      const existingChannel = await this.dynamodbService.repo.channels.get(channel.id)
 
       // reset authorization code to prevent repeated save channel requests by authorization code re-use
       const updatedUser: YtUser = { ...user, email, authorizationCode: randomBytes(10).toString('hex') }
 
-      const joystreamChannelLanguageIso = (await this.qnApi.getChannelById(joystreamChannelId.toString()))?.language
-        ?.iso
+      const joystreamChannelLanguageIso = jsChannel.language || undefined
+
+      // If channel already exists in the DB (in `OptedOut` state), then we
+      // associate most properties of existing channel record with the new
+      // channel, i.e. createdAt, email. userId etc. and only override the
+      // configuration properties provided in the request
       const updatedChannel: YtChannel = {
-        ...channel,
-        email,
+        ...(existingChannel
+          ? {
+              ...existingChannel,
+              yppStatus: 'Unverified',
+              userAccessToken: channel.userAccessToken,
+              userRefreshToken: channel.userRefreshToken,
+            }
+          : { ...channel, email }),
         joystreamChannelId,
         shouldBeIngested,
         videoCategoryId,
@@ -103,12 +140,27 @@ export class ChannelsController {
   }
 
   @Get(':joystreamChannelId')
-  @ApiOperation({ description: 'Retrieves channel by joystreamChannelId' })
   @ApiResponse({ type: ChannelDto })
+  @ApiOperation({ description: 'Retrieves channel by joystreamChannelId' })
   async get(@Param('joystreamChannelId', ParseIntPipe) id: number) {
     try {
-      const channel = await this.dynamodbService.channels.getByJoystreamChannelId(id)
-      return new ChannelDto(channel)
+      const channel = await this.dynamodbService.channels.getByJoystreamId(id)
+      const syncStatus = await this.contentProcessingClient.getJobsStatForChannel(channel.id)
+
+      return new ChannelDto(channel, syncStatus)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : error
+      throw new NotFoundException(message)
+    }
+  }
+
+  @Get(':joystreamChannelId/referrals')
+  @ApiResponse({ type: ChannelDto })
+  @ApiOperation({ description: 'Retrieves channel referrals by joystreamChannelId' })
+  async getReferredChannels(@Param('joystreamChannelId', ParseIntPipe) id: number) {
+    try {
+      const referredChannels = await this.dynamodbService.channels.getReferredChannels(id)
+      return referredChannels.map((c) => new ReferredChannelDto(c))
     } catch (error) {
       const message = error instanceof Error ? error.message : error
       throw new NotFoundException(message)
@@ -116,8 +168,8 @@ export class ChannelsController {
   }
 
   @Get()
-  @ApiOperation({ description: 'Retrieves the most recently verified 30 channels desc by date' })
   @ApiResponse({ type: ChannelDto })
+  @ApiOperation({ description: 'Retrieves the most recently verified 30 channels desc by date' })
   async getRecentVerifiedChannels() {
     try {
       const channels = await this.dynamodbService.channels.getRecent(30)
@@ -131,40 +183,18 @@ export class ChannelsController {
   @Put(':joystreamChannelId/ingest')
   @ApiBody({ type: IngestChannelDto })
   @ApiResponse({ type: ChannelDto })
-  @ApiOperation({
-    description: `Updates given channel ingestion/syncing status. Note: only channel owner can update the status`,
-  })
-  async ingestChannel(
-    @Param('joystreamChannelId', ParseIntPipe) id: number,
-    @Body() { message, signature }: IngestChannelDto
-  ) {
+  @ApiOperation({ description: `Updates given channel syncing status. Note: only channel owner can update the status` })
+  async ingestChannel(@Param('joystreamChannelId', ParseIntPipe) id: number, @Body() action: IngestChannelDto) {
     try {
-      const channel = await this.dynamodbService.channels.getByJoystreamChannelId(id)
-
-      // Ensure channel is not suspended or opted out
-      if (channel.yppStatus === 'Suspended' || channel.yppStatus === 'OptedOut') {
-        throw new Error(`Can't change ingestion status of a ${channel.yppStatus} channel. Permission denied.`)
-      }
-
-      const jsChannel = await this.qnApi.getChannelById(channel.joystreamChannelId.toString())
-      if (!jsChannel || !jsChannel.ownerMember) {
-        throw new Error(`Joystream Channel not found by ID ${id}.`)
-      }
-
-      // verify the message signature using Channel owner's address
-      const { isValid } = signatureVerify(JSON.stringify(message), signature, jsChannel.ownerMember.controllerAccount)
-
-      // Ensure that the signature is valid and the message is not a playback message
-      if (!isValid || channel.lastActedAt >= message.timestamp) {
-        throw new Error('Invalid request signature or playback message. Permission denied.')
-      }
+      // ensure that action is valid and authorized by channel owner
+      const { channel } = await this.ensureAuthorizedToPerformChannelAction(id, action)
 
       // update channel ingestion status
       await this.dynamodbService.channels.save({
         ...channel,
-        shouldBeIngested: message.shouldBeIngested,
-        lastActedAt: message.timestamp,
-        ...(message.videoCategoryId ? { videoCategoryId: message.videoCategoryId } : {}),
+        shouldBeIngested: action.message.shouldBeIngested,
+        lastActedAt: action.message.timestamp,
+        ...(action.message.videoCategoryId ? { videoCategoryId: action.message.videoCategoryId } : {}),
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : error
@@ -178,37 +208,43 @@ export class ChannelsController {
   @ApiOperation({
     description: `Updates given channel's YPP participation status. Note: only channel owner can update the status`,
   })
-  async optoutChannel(
-    @Param('joystreamChannelId', ParseIntPipe) id: number,
-    @Body() { message, signature }: OptoutChannelDto
-  ) {
+  async optoutChannel(@Param('joystreamChannelId', ParseIntPipe) id: number, @Body() action: OptoutChannelDto) {
     try {
-      const channel = await this.dynamodbService.channels.getByJoystreamChannelId(id)
-
-      // Ensure channel is not suspended
-      if (channel.yppStatus === 'Suspended') {
-        throw new Error(`Can't change YPP participation status of a suspended channel. Permission denied.`)
-      }
-
-      const jsChannel = await this.qnApi.getChannelById(channel.joystreamChannelId.toString())
-      if (!jsChannel || !jsChannel.ownerMember) {
-        throw new Error(`Joystream Channel not found by ID ${id}.`)
-      }
-
-      // verify the message signature using Channel owner's address
-      const { isValid } = signatureVerify(JSON.stringify(message), signature, jsChannel.ownerMember.controllerAccount)
-
-      // Ensure that the signature is valid and the message is not a playback message
-      if (!isValid || channel.lastActedAt >= message.timestamp) {
-        throw new Error('Invalid request signature or playback message. Permission denied.')
-      }
+      // ensure that action is valid and authorized by channel owner
+      const { channel } = await this.ensureAuthorizedToPerformChannelAction(id, action)
 
       // update channel's ypp participation status
       await this.dynamodbService.channels.save({
         ...channel,
-        yppStatus: message.optout ? 'OptedOut' : 'Unverified',
+        yppStatus: action.message.optout ? 'OptedOut' : 'Unverified',
         shouldBeIngested: false,
-        lastActedAt: message.timestamp,
+        lastActedAt: action.message.timestamp,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : error
+      throw new NotFoundException(message)
+    }
+  }
+
+  @Put(':joystreamChannelId/category')
+  @ApiBody({ type: UpdateChannelCategoryDto })
+  @ApiResponse({ type: ChannelDto })
+  @ApiOperation({
+    description: `Updates given channel's videos category. Note: only channel owner can update the status`,
+  })
+  async updateCategoryChannel(
+    @Param('joystreamChannelId', ParseIntPipe) id: number,
+    @Body() action: UpdateChannelCategoryDto
+  ) {
+    try {
+      // ensure that action is valid and authorized by channel owner
+      const { channel } = await this.ensureAuthorizedToPerformChannelAction(id, action)
+
+      // update channel's videos category ID
+      await this.dynamodbService.channels.save({
+        ...channel,
+        videoCategoryId: action.message.videoCategoryId,
+        lastActedAt: action.message.timestamp,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : error
@@ -218,34 +254,25 @@ export class ChannelsController {
 
   @Put('/suspend')
   @ApiBody({ type: SuspendChannelDto, isArray: true })
-  @ApiOperation({
-    description: `Authenticated endpoint to suspend given channel/s from YPP program`,
-  })
+  @ApiOperation({ description: `Authenticated endpoint to suspend given channel/s from YPP program` })
   async suspendChannels(
     @Headers('authorization') authorizationHeader: string,
     @Body(new ParseArrayPipe({ items: SuspendChannelDto, whitelist: true })) channels: SuspendChannelDto[]
   ) {
-    const yppOwnerKey = authorizationHeader ? authorizationHeader.split(' ')[1] : ''
-    // TODO: fix this YT_SYNCH__HTTP_API__OWNER_KEY config value
-    if (yppOwnerKey !== process.env.YT_SYNCH__HTTP_API__OWNER_KEY) {
-      throw new UnauthorizedException('Invalid YPP owner key')
-    }
+    // ensure operator authorization
+    await this.ensureOperatorAuthorization(authorizationHeader)
 
     try {
-      for (const { joystreamChannelId, isSuspended } of channels) {
-        const channel = await this.dynamodbService.channels.getByJoystreamChannelId(joystreamChannelId)
+      for (const { joystreamChannelId, reason } of channels) {
+        const channel = await this.dynamodbService.channels.getByJoystreamId(joystreamChannelId)
 
         // if channel is being suspended then its YT ingestion/syncing should also be stopped
-        if (isSuspended) {
-          await this.dynamodbService.channels.save({
-            ...channel,
-            yppStatus: 'Suspended',
-            shouldBeIngested: false,
-          })
-        } else {
-          // if channel suspension is revoked then its YT ingestion/syncing should not be resumed
-          await this.dynamodbService.channels.save({ ...channel, yppStatus: 'Unverified' })
-        }
+        await this.dynamodbService.channels.save({
+          ...channel,
+          yppStatus: `Suspended::${reason}`,
+          processedAt: new Date(),
+          allowOperatorIngestion: false,
+        })
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : error
@@ -254,13 +281,97 @@ export class ChannelsController {
   }
 
   @Put('/verify')
-  @ApiBody({ type: SuspendChannelDto, isArray: true })
-  @ApiOperation({
-    description: `Authenticated endpoint to verify given channel/s in YPP program`,
-  })
+  @ApiBody({ type: VerifyChannelDto, isArray: true })
+  @ApiOperation({ description: `Authenticated endpoint to verify given channel/s in YPP program` })
   async verifyChannels(
     @Headers('authorization') authorizationHeader: string,
     @Body(new ParseArrayPipe({ items: VerifyChannelDto, whitelist: true })) channels: VerifyChannelDto[]
+  ) {
+    // ensure operator authorization
+    await this.ensureOperatorAuthorization(authorizationHeader)
+
+    try {
+      for (const { joystreamChannelId, tier } of channels) {
+        const channel = await this.dynamodbService.channels.getByJoystreamId(joystreamChannelId)
+
+        // channel is being verified
+        await this.dynamodbService.channels.save({
+          ...channel,
+          yppStatus: `Verified::${tier}`,
+          processedAt: new Date(),
+          allowOperatorIngestion: true,
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : error
+      throw new NotFoundException(message)
+    }
+  }
+
+  @Put('/operatorIngestion')
+  @ApiBody({ type: SetOperatorIngestionStatusDto, isArray: true })
+  @ApiOperation({
+    description: `Authenticated endpoint to set operator ingestion status ("allowOperatorIngestion" field) of given channel/s in YPP program`,
+  })
+  async setOperatorIngestionStatusOfChannels(
+    @Headers('authorization') authorizationHeader: string,
+    @Body(new ParseArrayPipe({ items: SetOperatorIngestionStatusDto, whitelist: true }))
+    channels: SetOperatorIngestionStatusDto[]
+  ) {
+    // ensure operator authorization
+    await this.ensureOperatorAuthorization(authorizationHeader)
+
+    try {
+      for (const { joystreamChannelId, allowOperatorIngestion } of channels) {
+        const channel = await this.dynamodbService.channels.getByJoystreamId(joystreamChannelId)
+
+        // set operator ingestion status
+        await this.dynamodbService.channels.save({
+          ...channel,
+          allowOperatorIngestion,
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : error
+      throw new NotFoundException(message)
+    }
+  }
+
+  @Put('/category')
+  @ApiBody({ type: SetChannelCategoryByOperatorDto, isArray: true })
+  @ApiOperation({
+    description: `Authenticated endpoint to update video category of channel/s in YPP program by the Operator`,
+  })
+  async setChannelCategoryByOperator(
+    @Headers('authorization') authorizationHeader: string,
+    @Body(new ParseArrayPipe({ items: SetChannelCategoryByOperatorDto, whitelist: true }))
+    channels: SetChannelCategoryByOperatorDto[]
+  ) {
+    // ensure operator authorization
+    await this.ensureOperatorAuthorization(authorizationHeader)
+
+    try {
+      for (const { joystreamChannelId, videoCategoryId } of channels) {
+        const channel = await this.dynamodbService.channels.getByJoystreamId(joystreamChannelId)
+
+        // set operator ingestion status
+        await this.dynamodbService.channels.save({
+          ...channel,
+          videoCategoryId,
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : error
+      throw new NotFoundException(message)
+    }
+  }
+
+  @Post('/whitelist')
+  @ApiResponse({ type: WhitelistChannelDto, isArray: true })
+  @ApiOperation({ description: `Whitelist a given youtube channel/s by it's channel handle` })
+  async addWhitelistChannels(
+    @Headers('authorization') authorizationHeader: string,
+    @Body(new ParseArrayPipe({ items: WhitelistChannelDto, whitelist: true })) channels: WhitelistChannelDto[]
   ) {
     const yppOwnerKey = authorizationHeader ? authorizationHeader.split(' ')[1] : ''
     // TODO: fix this YT_SYNCH__HTTP_API__OWNER_KEY config value
@@ -269,16 +380,11 @@ export class ChannelsController {
     }
 
     try {
-      for (const { joystreamChannelId, isVerified } of channels) {
-        const channel = await this.dynamodbService.channels.getByJoystreamChannelId(joystreamChannelId)
-
-        // channel is being verified
-        if (isVerified) {
-          await this.dynamodbService.channels.save({ ...channel, yppStatus: 'Verified' })
-        } else {
-          // channel is being unverified
-          await this.dynamodbService.channels.save({ ...channel, yppStatus: 'Unverified' })
-        }
+      for (const { channelHandle } of channels) {
+        await this.dynamodbService.repo.whitelistChannels.save({
+          channelHandle: channelHandle.toLowerCase(),
+          createdAt: new Date(),
+        })
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : error
@@ -286,28 +392,28 @@ export class ChannelsController {
     }
   }
 
-  @Get(':joystreamChannelId/videos')
-  @ApiResponse({ type: VideoDto, isArray: true })
-  @ApiOperation({
-    description: `Retrieves all videos (in the backend system) for a given youtube channel by its corresponding joystream channel Id.`,
-  })
-  async getVideos(@Param('joystreamChannelId', ParseIntPipe) id: number): Promise<YtVideo[]> {
+  @Delete('/whitelist/:channelHandle')
+  @ApiResponse({ type: WhitelistChannelDto })
+  @ApiOperation({ description: `Remove a whitelisted channel by it's channel handle` })
+  async deleteWhitelistedChannel(
+    @Headers('authorization') authorizationHeader: string,
+    @Param('channelHandle') channelHandle: string
+  ) {
+    // ensure operator authorization
+    await this.ensureOperatorAuthorization(authorizationHeader)
+
     try {
-      const channelId = (await this.dynamodbService.channels.getByJoystreamChannelId(id)).id
-      const result = await this.dynamodbService.repo.videos.query({ channelId }, (q) => q.sort('descending'))
-      return result
+      const whitelistChannel = await this.dynamodbService.repo.whitelistChannels.get(channelHandle.toLowerCase())
+
+      if (!whitelistChannel) {
+        throw new NotFoundException(`Channel with handle ${channelHandle} is not whitelisted`)
+      }
+
+      await this.dynamodbService.repo.whitelistChannels.delete(channelHandle)
     } catch (error) {
       const message = error instanceof Error ? error.message : error
       throw new NotFoundException(message)
     }
-  }
-
-  @Get(':id/videos/:videoId')
-  @ApiResponse({ type: ChannelDto })
-  @ApiOperation({ description: 'Retrieves particular video by it`s channel id' })
-  async getVideo(@Param('id') id: string, @Param('videoId') videoId: string) {
-    const result = await this.dynamodbService.repo.videos.get(id, videoId)
-    return result
   }
 
   @Get('/induction/requirements')
@@ -324,6 +430,51 @@ export class ChannelsController {
     await this.dynamodbService.users.save(user)
 
     // save channel
-    return await this.dynamodbService.channels.save(channel)
+    await this.dynamodbService.channels.save(channel)
+
+    // fetch and save channel's videos
+    if (this.config.sync.enable) {
+      // The videos ingestion action is done as a background job rather than blocking
+      // the request (as it may take a considerable time depending on the number of
+      // videos). Even if the ingestion fails it will be retried in next polling cycle.
+      setImmediate(() => this.youtubePollingService.performVideosIngestion(channel))
+    }
+  }
+
+  private async ensureOperatorAuthorization(authorizationHeader: string): Promise<void> {
+    const yppOwnerKey = authorizationHeader ? authorizationHeader.split(' ')[1] : ''
+    // TODO: fix this YT_SYNCH__HTTP_API__OWNER_KEY config value
+    if (yppOwnerKey !== process.env.YT_SYNCH__HTTP_API__OWNER_KEY) {
+      throw new UnauthorizedException('Invalid YPP owner key')
+    }
+  }
+
+  private async ensureAuthorizedToPerformChannelAction(
+    joystreamChannelId: number,
+    action: IngestChannelDto | OptoutChannelDto | UpdateChannelCategoryDto
+  ): Promise<{ channel: YtChannel }> {
+    const { signature, message } = action
+    const actionType: string = (action as any).constructor.name.replace('Dto', '')
+    const channel = await this.dynamodbService.channels.getByJoystreamId(joystreamChannelId)
+
+    // Ensure channel is not suspended or opted out
+    if (YtChannel.isSuspended(channel) || channel.yppStatus === 'OptedOut') {
+      throw new Error(`Can't perform "${actionType}" action on a "${channel.yppStatus}" channel. Permission denied.`)
+    }
+
+    const jsChannel = await this.qnApi.getChannelById(channel.joystreamChannelId.toString())
+    if (!jsChannel || !jsChannel.ownerMember) {
+      throw new Error(`Joystream Channel not found by ID ${joystreamChannelId}.`)
+    }
+
+    // verify the message signature using Channel owner's address
+    const { isValid } = signatureVerify(JSON.stringify(message), signature, jsChannel.ownerMember.controllerAccount)
+
+    // Ensure that the signature is valid and the message is not a playback message
+    if (!isValid || channel.lastActedAt >= message.timestamp) {
+      throw new Error('Invalid request signature or playback message. Permission denied.')
+    }
+
+    return { channel }
   }
 }

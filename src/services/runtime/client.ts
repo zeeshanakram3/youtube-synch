@@ -9,9 +9,11 @@ import {
   VideoMetadata,
 } from '@joystream/metadata-protobuf'
 import { createType } from '@joystream/types'
+import { SubmittableExtrinsic } from '@polkadot/api/types'
 import { Bytes } from '@polkadot/types'
 import { Option } from '@polkadot/types/'
 import { PalletContentStorageAssetsRecord } from '@polkadot/types/lookup'
+import type { ISubmittableResult } from '@polkadot/types/types'
 import axios from 'axios'
 import BN from 'bn.js'
 import ffmpeg from 'fluent-ffmpeg'
@@ -22,12 +24,13 @@ import { Readable } from 'stream'
 import { Logger } from 'winston'
 import { ReadonlyConfig } from '../../types'
 import { ExitCodes, RuntimeApiError } from '../../types/errors'
-import { Thumbnails, YtVideo } from '../../types/youtube'
-import { AppActionSignatureInput, computeFileHashAndSize, signAppActionCommitmentForVideo } from '../../utils/hasher'
+import { Thumbnails, YtVideo, YtVideoWithJsChannelId } from '../../types/youtube'
+import { AppActionSignatureInput, signAppActionCommitmentForVideo } from '../../utils/hasher'
 import { LoggingService } from '../logging'
 import { QueryNodeApi } from '../query-node/api'
-import { IYoutubeApi } from '../youtube/api'
-import { RuntimeApi } from './api'
+import { MembershipFieldsFragment as Membership } from '../query-node/generated/queries'
+import { VideoMetadataAndHash } from '../syncProcessing/ContentMetadataService'
+import { CreateVideoExtrinsicDefaults, RuntimeApi } from './api'
 import { asValidatedMetadata, metadataToBytes } from './serialization'
 import { AccountsUtil } from './signer'
 import {
@@ -44,16 +47,14 @@ export class JoystreamClient {
   private runtimeApi: RuntimeApi
   private accounts: AccountsUtil
   private qnApi: QueryNodeApi
-  private youtubeApi: IYoutubeApi
   private config: ReadonlyConfig
   private logger: Logger
 
-  constructor(config: ReadonlyConfig, youtubeApi: IYoutubeApi, qnApi: QueryNodeApi, logging: LoggingService) {
+  constructor(config: ReadonlyConfig, runtimeApi: RuntimeApi, qnApi: QueryNodeApi, logging: LoggingService) {
     this.logger = logging.createLogger('JoystreamClient')
     this.qnApi = qnApi
     this.config = config
-    this.youtubeApi = youtubeApi
-    this.runtimeApi = new RuntimeApi(this.config.endpoints.joystreamNodeWs, logging)
+    this.runtimeApi = runtimeApi
     this.accounts = new AccountsUtil(this.config.joystream)
   }
 
@@ -65,7 +66,7 @@ export class JoystreamClient {
     return this.runtimeApi.query.content.channelById(id)
   }
 
-  async hasQueryNodeProcessedBlock(blockNumber: BN) {
+  async hasQueryNodeProcessedBlock(blockNumber: number) {
     const qnState = await this.qnApi.getQueryNodeState()
 
     if (!qnState) {
@@ -73,16 +74,15 @@ export class JoystreamClient {
       return false
     }
 
-    if (blockNumber.gtn(qnState.lastCompleteBlock)) {
-      this.logger.warn(
-        `Query Node has not processed block ${blockNumber.toString()} yet. Last processed block: ${
-          qnState.lastCompleteBlock
-        }`
-      )
+    if (blockNumber > qnState.lastProcessedBlock) {
       return false
     }
 
     return true
+  }
+
+  async createVideoExtrinsicDefaults(channelId: number) {
+    return this.runtimeApi.createVideoExtrinsicDefaults(channelId)
   }
 
   // Get Joystream video by by Youtube resource id/attribution synced by the app (if any)
@@ -91,12 +91,31 @@ export class JoystreamClient {
     return this.qnApi.getVideoByYtResourceIdAndEntryAppName(ytVideoId, appName)
   }
 
-  async doesChannelHaveCollaborator(channelId: number) {
+  async totalVideosCreatedByChannel(channelId: number) {
+    return (await this.qnApi.getChannelById(channelId.toString()))?.totalVideosCreated || 0
+  }
+
+  async getApp() {
+    const appName = this.config.joystream.app.name
+    const app = await this.qnApi.getAppByName(appName)
+    if (!app || !app.authKey) {
+      throw new RuntimeApiError(ExitCodes.RuntimeApi.APP_NOT_FOUND, `Either App(${appName}), or its authKey not found`)
+    }
+    return app
+  }
+
+  async getCollaboratorMember() {
     const member = await this.qnApi.memberById(this.collaboratorId)
     if (!member) {
-      throw new Error(`Joystream member with id ${this.collaboratorId} not found`)
+      throw new RuntimeApiError(
+        ExitCodes.RuntimeApi.COLLABORATOR_NOT_FOUND,
+        `Joystream member with id ${this.collaboratorId} not found`
+      )
     }
+    return member
+  }
 
+  async doesChannelHaveCollaborator(channelId: number) {
     const { collaborators } = await this.channelById(channelId)
     const isCollaboratorSet = [...collaborators].some(
       ([member, permissions]) => member.toString() === this.collaboratorId && [...permissions].some((p) => p.isAddVideo)
@@ -105,57 +124,58 @@ export class JoystreamClient {
     return isCollaboratorSet
   }
 
-  async createVideo(video: YtVideo, videoFilePath: string): Promise<[YtVideo, BN]> {
-    const collaborator = await this.qnApi.memberById(this.collaboratorId)
-    if (!collaborator) {
-      throw new Error(`Joystream member with id ${this.collaboratorId} not found`)
-    }
-    // Video metadata & assets
-    const { meta: rawAction, assets } = await this.prepareVideoInput(this.runtimeApi, video, videoFilePath)
+  async sendBatchExtrinsic(account: string, txs: SubmittableExtrinsic<'promise', ISubmittableResult>[]) {
+    const keyPair = this.accounts.getPair(account)
+    const batchTx = this.runtimeApi.tx.utility.batchAll(txs)
+    const result = await this.runtimeApi.sendExtrinsic(keyPair, batchTx)
+    const blockHash = result.status.isInBlock ? result.status.asInBlock : result.status.asFinalized
 
-    const creatorId = video.joystreamChannelId.toString()
-    const nonce = (await this.qnApi.getChannelById(creatorId || ''))?.totalVideosCreated || 0
-    const appActionMetadata = metadataToBytes(AppActionMetadata, { videoId: video.resourceId })
-    const appAction = await this.prepareAppActionInput({
+    const events = this.runtimeApi.getEvents(result, 'content', 'VideoCreated')
+    return {
+      blockNumber: (await this.runtimeApi.rpc.chain.getHeader(blockHash)).number.toNumber(),
+      result: events.map(({ data }) => ({
+        joystreamVideo: {
+          id: data[2].toString(),
+          assetIds: [...data[4]].map((a) => a.toString()),
+        },
+      })),
+    }
+  }
+
+  async createVideoTx(
+    appId: string,
+    nonce: number,
+    collaborator: Membership,
+    extrinsicDefaults: CreateVideoExtrinsicDefaults,
+    video: YtVideoWithJsChannelId & { videoMetadata: VideoMetadataAndHash }
+  ): Promise<SubmittableExtrinsic<'promise', ISubmittableResult>> {
+    // Video metadata & assets
+    const { meta: rawAction, assets } = this.prepareVideoInput(extrinsicDefaults, video, video.videoMetadata)
+
+    const appActionMetadata = metadataToBytes(AppActionMetadata, { videoId: video.id })
+    const appAction = await this.prepareAppActionInput(appId, {
       rawAction,
       assets,
       nonce,
-      creatorId,
+      creatorId: video.joystreamChannelId.toString(),
       appActionMetadata,
     })
 
-    const keyPair = this.accounts.getPair(collaborator.controllerAccount)
-    const createdVideo = await this.runtimeApi.createVideo(
-      keyPair,
+    const createdVideoTx = this.runtimeApi.prepareCreateVideoTx(
       collaborator.id,
       video.joystreamChannelId,
+      extrinsicDefaults,
       appAction,
       assets
     )
 
-    return [
-      {
-        ...video,
-        joystreamVideo: {
-          id: createdVideo.videoId.toString(),
-          assetIds: createdVideo.assetsIds.map((a) => a.toString()),
-        },
-      },
-      createdVideo.createdInBlock,
-    ]
+    return createdVideoTx
   }
 
-  private async prepareAppActionInput(appActionSignatureInput: AppActionSignatureInput): Promise<Bytes> {
-    const appName = this.config.joystream.app.name
-    const app = await this.qnApi.getAppByName(appName)
-    if (!app || !app.authKey) {
-      throw new RuntimeApiError(ExitCodes.RuntimeApi.APP_NOT_FOUND, `Either App(${appName}), or its authKey not found`)
-    }
-
+  private async prepareAppActionInput(appId: string, appActionSignatureInput: AppActionSignatureInput): Promise<Bytes> {
     const appActionSignature = await signAppActionCommitmentForVideo(appActionSignatureInput, this.accounts.appAuthKey)
-
     const appActionInput: IAppAction = {
-      appId: app.id,
+      appId,
       rawAction: appActionSignatureInput.rawAction,
       signature: appActionSignature,
       metadata: appActionSignatureInput.appActionMetadata,
@@ -164,25 +184,14 @@ export class JoystreamClient {
     return appAction
   }
 
-  private async prepareVideoInput(
-    api: RuntimeApi,
+  private prepareVideoInput(
+    { perMegabyteFee }: CreateVideoExtrinsicDefaults,
     video: YtVideo,
-    filePath: string
-  ): Promise<{ meta: Bytes; assets: Option<PalletContentStorageAssetsRecord> }> {
+    { thumbnailHash, mediaHash, mediaMetadata }: VideoMetadataAndHash
+  ): { meta: Bytes; assets: Option<PalletContentStorageAssetsRecord> } {
     const inputAssets: VideoInputAssets = {}
-    const videoHashStream = fs.createReadStream(filePath)
-    const { hash: videoHash, size: videoSize } = await computeFileHashAndSize(videoHashStream)
-    const videoAssetMeta: DataObjectMetadata = {
-      ipfsHash: videoHash,
-      size: videoSize,
-    }
-
-    const thumbnailPhotoStream = await getThumbnailAsset(video.thumbnails)
-    const { hash: thumbnailPhotoHash, size: thumbnailPhotoSize } = await computeFileHashAndSize(thumbnailPhotoStream)
-    const thumbnailPhotoAssetMeta: DataObjectMetadata = {
-      ipfsHash: thumbnailPhotoHash,
-      size: thumbnailPhotoSize,
-    }
+    inputAssets.video = { ipfsHash: mediaHash.hash, size: mediaHash.size }
+    inputAssets.thumbnailPhoto = { ipfsHash: thumbnailHash.hash, size: thumbnailHash.size }
 
     const videoInputParameters: VideoInputParameters = {
       title: video.title,
@@ -190,23 +199,19 @@ export class JoystreamClient {
       category: video.category,
       language: video.languageIso,
       isPublic: true,
+      isShort: video.isShort,
       duration: video.duration,
       license: getVideoLicense(video),
+      publishedBeforeJoystream: { isPublished: true, date: video.publishedAt },
     }
     let videoMetadata = asValidatedMetadata(VideoMetadata, videoInputParameters)
-
-    const videoFileMetadata = await getVideoFileMetadata(filePath)
-    videoMetadata = setVideoMetadataDefaults(videoMetadata, videoFileMetadata)
-
-    inputAssets.video = videoAssetMeta
-    inputAssets.thumbnailPhoto = thumbnailPhotoAssetMeta
+    videoMetadata = setVideoMetadataDefaults(videoMetadata, mediaMetadata)
 
     // prepare data objects and assign proper indexes in metadata
-    const videoDataObjectsMetadata: DataObjectMetadata[] = [
+    const dataObjectsMetadata: DataObjectMetadata[] = [
       ...(inputAssets.video ? [inputAssets.video] : []),
       ...(inputAssets.thumbnailPhoto ? [inputAssets.thumbnailPhoto] : []),
     ]
-    const assets = await prepareAssetsForExtrinsic(api, videoDataObjectsMetadata)
     if (inputAssets.video) {
       videoMetadata.video = 0
     }
@@ -215,23 +220,29 @@ export class JoystreamClient {
     }
 
     const meta = metadataToBytes(ContentMetadata, { videoMetadata })
+    const assets = prepareAssetsForExtrinsic(perMegabyteFee, dataObjectsMetadata)
 
     return { meta, assets }
   }
 }
 
 export async function getThumbnailAsset(thumbnails: Thumbnails) {
-  // * We are using `medium` thumbnail because it has correct aspect ratio for Atlas (16/9)
-  const response = await axios.get<Readable>(thumbnails.medium, { responseType: 'stream' })
-  return response.data
+  try {
+    // * We are using `medium` thumbnail because it has correct aspect ratio for Atlas (16/9)
+    const response = await axios.get<Readable>(thumbnails.medium, { responseType: 'stream' })
+    return response.data
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      throw error.toJSON()
+    }
+    throw error
+  }
 }
 
-async function prepareAssetsForExtrinsic(
-  api: RuntimeApi,
+function prepareAssetsForExtrinsic(
+  perMegabyteFee: BN,
   dataObjectsMetadata: DataObjectMetadata[]
-): Promise<Option<PalletContentStorageAssetsRecord>> {
-  const feePerMB = await api.query.storage.dataObjectPerMegabyteFee()
-
+): Option<PalletContentStorageAssetsRecord> {
   const objectCreationList = dataObjectsMetadata.map((metadata) => ({
     size_: metadata.size,
     ipfsContentId: metadata.ipfsHash,
@@ -241,7 +252,7 @@ async function prepareAssetsForExtrinsic(
     'Option<PalletContentStorageAssetsRecord>',
     dataObjectsMetadata.length
       ? {
-          expectedDataSizeFee: feePerMB,
+          expectedDataSizeFee: perMegabyteFee,
           objectCreationList: objectCreationList,
         }
       : null
@@ -294,24 +305,17 @@ function getVideoFFProbeMetadata(filePath: string): Promise<VideoFFProbeMetadata
           duration: videoStream.duration !== undefined ? Math.ceil(Number(videoStream.duration)) || 0 : undefined,
         })
       } else {
-        reject(new Error('No video stream found in file'))
+        reject(new Error('NoVideoStreamInFile'))
       }
     })
   })
 }
 
-async function getVideoFileMetadata(filePath: string): Promise<VideoFileMetadata> {
-  let ffProbeMetadata: VideoFFProbeMetadata = {}
-  try {
-    ffProbeMetadata = await getVideoFFProbeMetadata(filePath)
-  } catch (e) {
-    const message = e instanceof Error ? e.message : e
-    console.warn(`Failed to get video metadata via ffprobe (${message})`)
-  }
-
+export async function getVideoFileMetadata(filePath: string): Promise<VideoFileMetadata> {
   const size = fs.statSync(filePath).size
   const container = path.extname(filePath).slice(1)
   const mimeType = mimeTypes.lookup(container) || `unknown`
+  const ffProbeMetadata = await getVideoFFProbeMetadata(filePath)
   return {
     size,
     container,

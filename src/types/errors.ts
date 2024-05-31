@@ -6,6 +6,7 @@ export namespace ExitCodes {
     CHANNEL_STATUS_SUSPENDED = 'CHANNEL_STATUS_SUSPENDED',
     CHANNEL_CRITERIA_UNMET_SUBSCRIBERS = 'CHANNEL_CRITERIA_UNMET_SUBSCRIBERS',
     CHANNEL_CRITERIA_UNMET_VIDEOS = 'CHANNEL_CRITERIA_UNMET_VIDEOS',
+    CHANNEL_CRITERIA_UNMET_NEW_VIDEOS_REQUIREMENT = 'CHANNEL_CRITERIA_UNMET_NEW_VIDEOS_REQUIREMENT',
     CHANNEL_CRITERIA_UNMET_CREATION_DATE = 'CHANNEL_CRITERIA_UNMET_CREATION_DATE',
     YOUTUBE_QUOTA_LIMIT_EXCEEDED = 'YOUTUBE_QUOTA_LIMIT_EXCEEDED',
     YOUTUBE_API_NOT_CONNECTED = 'YOUTUBE_API_NOT_CONNECTED',
@@ -61,6 +62,15 @@ export class StorageApiError {
 export class QueryNodeApiError {
   constructor(
     public code: ExitCodes.QueryNodeApi,
+    public message?: string,
+    public result?: number | string | Date,
+    public expected?: number | string | Date
+  ) {}
+}
+
+export class FaucetApiError {
+  constructor(
+    public code: string,
     public message?: string,
     public result?: number | string | Date,
     public expected?: number | string | Date

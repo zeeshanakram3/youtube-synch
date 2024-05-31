@@ -4,15 +4,31 @@ import {
   IsBoolean,
   IsDate,
   IsEmail,
+  IsEnum,
   IsNumber,
   IsOptional,
   IsString,
   IsUrl,
+  Matches,
   ValidateIf,
   ValidateNested,
 } from 'class-validator'
 import { Config } from '../../types'
-import { JoystreamVideo, VideoState, YtChannel, YtUser, YtVideo } from '../../types/youtube'
+import { ExitCodes } from '../../types/errors'
+import {
+  ChannelSyncStatus,
+  ChannelYppStatus,
+  ChannelYppStatusSuspended,
+  ChannelYppStatusVerified,
+  JoystreamVideo,
+  TopReferrer,
+  VideoState,
+  YtChannel,
+  YtUser,
+  YtVideo,
+  channelYppStatus,
+} from '../../types/youtube'
+import { pluralizeNoun } from '../../utils/misc'
 
 // NestJS Data Transfer Objects (DTO)s
 
@@ -23,23 +39,71 @@ export class ThumbnailsDto {
   @ApiProperty() standard: string
 }
 
+export class StatusDto {
+  @ApiProperty() version: string
+  @ApiProperty() syncStatus: 'enabled' | 'disabled'
+  @ApiProperty() syncBacklog: number
+}
+
 export class CollaboratorStatusDto {
   @ApiProperty() memberId: string
   @ApiProperty() controllerAccount: string
   @ApiProperty() balance: string
 }
 
+export class InductionRequirement {
+  @ApiProperty({ description: 'Template for the signup requirement text' })
+  template: string
+
+  @ApiProperty({ description: 'Variables for requirement template' })
+  variables: string[]
+
+  @ApiProperty({
+    description: 'Error code to be returned when channel signup fails due to unmet requirement',
+    enum: ExitCodes.YoutubeApi,
+  })
+  errorCode: ExitCodes.YoutubeApi
+}
+
 export class ChannelInductionRequirementsDto {
-  @ApiProperty() MINIMUM_SUBSCRIBERS_COUNT: number
-  @ApiProperty() MINIMUM_VIDEO_COUNT: number
-  @ApiProperty() MINIMUM_VIDEO_AGE_HOURS: number
-  @ApiProperty() MINIMUM_CHANNEL_AGE_HOURS: number
+  @ApiProperty({
+    description: 'List of requirements user YT channel needs to fulfill',
+    type: InductionRequirement,
+    isArray: true,
+  })
+  requirements: InductionRequirement[]
 
   constructor(requirements: Config['creatorOnboardingRequirements']) {
-    this.MINIMUM_SUBSCRIBERS_COUNT = requirements.minimumSubscribersCount
-    this.MINIMUM_VIDEO_COUNT = requirements.minimumVideoCount
-    this.MINIMUM_VIDEO_AGE_HOURS = requirements.minimumVideoAgeHours
-    this.MINIMUM_CHANNEL_AGE_HOURS = requirements.minimumChannelAgeHours
+    this.requirements = [
+      {
+        errorCode: ExitCodes.YoutubeApi.CHANNEL_CRITERIA_UNMET_SUBSCRIBERS,
+        template: 'YouTube channel has at least {}.',
+        variables: [pluralizeNoun(requirements.minimumSubscribersCount, 'subscriber')],
+      },
+      {
+        errorCode: ExitCodes.YoutubeApi.CHANNEL_CRITERIA_UNMET_VIDEOS,
+        template: 'YouTube channel has at least {}.',
+        variables: [pluralizeNoun(requirements.minimumVideosCount, 'video')],
+      },
+      {
+        errorCode: ExitCodes.YoutubeApi.CHANNEL_CRITERIA_UNMET_CREATION_DATE,
+        template: 'YouTube channel needs to be older than {}.',
+        variables: [pluralizeNoun(Math.round(requirements.minimumChannelAgeHours * 0.001), 'month')],
+      },
+    ]
+  }
+}
+
+class ChannelSyncStatusDto {
+  @ApiProperty({ description: 'No. of videos in sync backlog for the channel' }) backlogCount: number
+  @ApiProperty({ description: 'ETA (seconds) to fully sync all planned videos of the channel' }) fullSyncEta: number
+  @ApiProperty({ description: 'Place in the sync queue of the earliest video for the channel,' })
+  placeInSyncQueue: number
+
+  constructor(syncStatus?: ChannelSyncStatus) {
+    this.backlogCount = syncStatus?.backlogCount || 0
+    this.fullSyncEta = syncStatus?.fullSyncEta || 0
+    this.placeInSyncQueue = syncStatus?.placeInSyncQueue || 0
   }
 }
 
@@ -47,9 +111,8 @@ export class ChannelDto {
   @ApiProperty() youtubeChannelId: string
   @ApiProperty() title: string
   @ApiProperty() description: string
-  @ApiProperty() aggregatedStats: number
   @ApiProperty() shouldBeIngested: boolean
-  @ApiProperty() yppStatus: string
+  @ApiProperty({ enum: channelYppStatus }) yppStatus: ChannelYppStatus
   @ApiProperty() joystreamChannelId: number
   @ApiProperty() referrerChannelId?: number
   @ApiProperty() videoCategoryId: string
@@ -57,8 +120,9 @@ export class ChannelDto {
   @ApiProperty() thumbnails: ThumbnailsDto
   @ApiProperty() subscribersCount: number
   @ApiProperty() createdAt: Date
+  @ApiProperty() syncStatus?: ChannelSyncStatus
 
-  constructor(channel: YtChannel) {
+  constructor(channel: YtChannel, syncStatus?: ChannelSyncStatus) {
     this.youtubeChannelId = channel.id
     this.title = channel.title
     this.description = channel.description
@@ -69,9 +133,39 @@ export class ChannelDto {
     this.language = channel.language
     this.shouldBeIngested = channel.shouldBeIngested
     this.yppStatus = channel.yppStatus
-    this.aggregatedStats = channel.aggregatedStats
     this.thumbnails = channel.thumbnails
     this.createdAt = new Date(channel.createdAt)
+    this.syncStatus = new ChannelSyncStatusDto(syncStatus)
+  }
+}
+
+export class ReferredChannelDto {
+  @ApiProperty() joystreamChannelId: number
+  @ApiProperty() title: string
+  @ApiProperty() subscribersCount: number
+  @ApiProperty() yppStatus: string
+  @ApiProperty() createdAt: Date
+
+  constructor(referrerChannel: YtChannel) {
+    this.joystreamChannelId = referrerChannel.joystreamChannelId
+    this.title = referrerChannel.title
+    this.subscribersCount = referrerChannel.statistics.subscriberCount
+    this.yppStatus = referrerChannel.yppStatus
+    this.createdAt = new Date(referrerChannel.createdAt)
+  }
+}
+
+export class TopReferrerDto {
+  @ApiProperty() referrerChannelId: number
+  @ApiProperty() referredByTier: { [K in ChannelYppStatusVerified]: number }
+  @ApiProperty() totalEarnings: number
+  @ApiProperty() totalReferredChannels: number
+
+  constructor(topReferrer: TopReferrer) {
+    this.referrerChannelId = topReferrer.referrerChannelId
+    this.referredByTier = topReferrer.referredByTier
+    this.totalEarnings = topReferrer.totalEarnings
+    this.totalReferredChannels = topReferrer.totalReferredChannels
   }
 }
 
@@ -100,6 +194,24 @@ export class VerifyChannelResponse {
 
   // ID of the verified user
   @IsString() @ApiProperty({ required: true }) userId: string
+
+  // Youtube Channel/User handle
+  @IsString() @ApiProperty() channelHandle: string
+
+  // Youtube Channel title
+  @IsString() @ApiProperty({ required: true }) channelTitle: string
+
+  // Youtube Channel description
+  @IsString() @ApiProperty({ required: true }) channelDescription: string
+
+  // Youtube Channel default language
+  @IsString() @ApiProperty() channelLanguage: string
+
+  // Youtube Channel avatar URL
+  @IsString() @ApiProperty({ required: true }) avatarUrl: string
+
+  // Youtube Channel banner URL
+  @IsString() @ApiProperty() bannerUrl: string
 }
 
 // Dto for saving the verified Youtube channel
@@ -107,7 +219,7 @@ export class SaveChannelRequest {
   // Authorization code send to the backend after user o-auth verification
   @IsString() @ApiProperty({ required: true }) authorizationCode: string
 
-  // Authorization code send to the backend after user O-auth verification
+  // UserId of the Youtube creator return from Google Oauth API
   @IsString() @ApiProperty({ required: true }) userId: string
 
   // Email of the user
@@ -139,6 +251,44 @@ export class SaveChannelResponse {
   }
 }
 
+// Dto for creating membership request
+export class CreateMembershipRequest {
+  // UserId of the Youtube creator return from Google Oauth API
+  @IsString() @ApiProperty({ required: true }) userId: string
+
+  // Authorization code send to the backend after user o-auth verification
+  @IsString() @ApiProperty({ required: true }) authorizationCode: string
+
+  // Membership Account address
+  @IsString() @ApiProperty({ required: true }) account: string
+
+  // Membership Handle
+  @IsString() @ApiProperty({ required: true }) handle: string
+
+  // Membership avatar URL
+  @IsOptional() @IsUrl({ require_tld: false }) @ApiProperty({ required: true }) avatar: string
+
+  // `about` information to associate with new Membership
+  @ApiProperty() about: string
+
+  // Membership name
+  @ApiProperty() name: string
+}
+
+// Dto for create membership response
+export class CreateMembershipResponse {
+  // Membership Account address
+  @IsNumber() @ApiProperty({ required: true }) memberId: number
+
+  // Membership Handle
+  @IsString() @ApiProperty({ required: true }) handle: string
+
+  constructor(memberId: number, handle: string) {
+    this.memberId = memberId
+    this.handle = handle
+  }
+}
+
 export class VideoDto extends YtVideo {
   @ApiProperty() url: string
   @ApiProperty() title: string
@@ -156,26 +306,46 @@ export class VideoDto extends YtVideo {
 }
 
 class IngestChannelMessage {
+  // Whether to enable/disable ingestion (true/false)
   @IsBoolean() shouldBeIngested: boolean
+
+  // VideoCategory ID (that should be added to auto synced videos)
   @ValidateIf((c: IngestChannelMessage) => c.shouldBeIngested)
   @IsString()
   @ApiProperty({ required: true })
   videoCategoryId: string
 
+  // Action timestamp (being used to prevent message replay)
   @Type(() => Date)
   @IsDate()
   timestamp: Date
 }
 
 class OptoutChannelMessage {
+  // true/false
   @IsBoolean() optout: boolean
+
+  // Action timestamp (being used to prevent message replay)
+  @Type(() => Date)
+  @IsDate()
+  timestamp: Date
+}
+
+class UpdateChannelCategoryMessage {
+  // VideoCategory ID (that should be added to auto synced videos)
+  @IsString() @ApiProperty({ required: true }) videoCategoryId: string
+
+  // Action timestamp (being used to prevent message replay)
   @Type(() => Date)
   @IsDate()
   timestamp: Date
 }
 
 export class IngestChannelDto {
+  // signature
   @IsString() @ApiProperty({ required: true }) signature: string
+
+  // message object
   @ApiProperty({ required: true })
   @ValidateNested()
   @Type(() => IngestChannelMessage)
@@ -183,19 +353,65 @@ export class IngestChannelDto {
 }
 
 export class OptoutChannelDto {
+  // signature
   @IsString() @ApiProperty({ required: true }) signature: string
+
+  // message object
   @ApiProperty({ required: true })
   @ValidateNested()
   @Type(() => OptoutChannelMessage)
   message: OptoutChannelMessage
 }
 
+export class UpdateChannelCategoryDto {
+  // signature
+  @IsString() @ApiProperty({ required: true }) signature: string
+
+  // message object
+  @ApiProperty({ required: true })
+  @ValidateNested()
+  @Type(() => UpdateChannelCategoryMessage)
+  message: UpdateChannelCategoryMessage
+}
+
 export class SuspendChannelDto {
+  // Channel Id
   @IsNumber() @ApiProperty({ required: true }) joystreamChannelId: number
-  @IsBoolean() @ApiProperty({ required: true }) isSuspended: boolean
+
+  // yppStatus
+  @IsEnum(ChannelYppStatusSuspended)
+  @ApiProperty({ required: true, enum: ChannelYppStatusSuspended })
+  reason: ChannelYppStatusSuspended
 }
 
 export class VerifyChannelDto {
+  // Channel Id
   @IsNumber() @ApiProperty({ required: true }) joystreamChannelId: number
-  @IsBoolean() @ApiProperty({ required: true }) isVerified: boolean
+
+  // yppStatus
+  @IsEnum(ChannelYppStatusVerified)
+  @ApiProperty({ required: true, enum: ChannelYppStatusVerified })
+  tier: ChannelYppStatusVerified
+}
+
+export class SetOperatorIngestionStatusDto {
+  // Channel Id
+  @IsNumber() @ApiProperty({ required: true }) joystreamChannelId: number
+
+  // Whether to enable/disable ingestion (true/false)
+  @IsBoolean() @ApiProperty({ required: true }) allowOperatorIngestion: boolean
+}
+
+export class SetChannelCategoryByOperatorDto {
+  // Channel Id
+  @IsNumber() @ApiProperty({ required: true }) joystreamChannelId: number
+
+  // VideoCategory ID to set for given channel
+  @IsBoolean() @ApiProperty({ required: true }) videoCategoryId: string
+}
+
+export class WhitelistChannelDto {
+  @Matches(/^@/, { message: 'The channel handle should start with a "@"' })
+  @ApiProperty({ required: true })
+  channelHandle: string
 }

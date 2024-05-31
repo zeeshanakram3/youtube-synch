@@ -1,5 +1,5 @@
 import * as aws from '@pulumi/aws'
-import { resourcePrefix, Stats, YtChannel, YtUser, YtVideo } from '../types/youtube'
+import { resourcePrefix, Stats, WhitelistChannel, YtChannel, YtUser, YtVideo } from '../types/youtube'
 
 const nameof = <T>(name: keyof T) => <string>name
 
@@ -12,9 +12,7 @@ const userTable = new aws.dynamodb.Table('users', {
       type: 'S',
     },
   ],
-  billingMode: 'PROVISIONED',
-  readCapacity: 1,
-  writeCapacity: 1,
+  billingMode: 'PAY_PER_REQUEST',
 })
 
 const channelsTable = new aws.dynamodb.Table('channels', {
@@ -42,35 +40,36 @@ const channelsTable = new aws.dynamodb.Table('channels', {
       name: nameof<YtChannel>('phantomKey'),
       type: 'S',
     },
+    {
+      name: nameof<YtChannel>('referrerChannelId'),
+      type: 'N',
+    },
   ],
-  billingMode: 'PROVISIONED',
   globalSecondaryIndexes: [
     {
       name: 'joystreamChannelId-createdAt-index',
       hashKey: nameof<YtChannel>('joystreamChannelId'),
       rangeKey: nameof<YtChannel>('createdAt'),
       projectionType: 'ALL',
-      readCapacity: 1,
-      writeCapacity: 1,
     },
     {
       name: 'phantomKey-createdAt-index',
-      hashKey: nameof<YtChannel>('phantomKey'), // we'll have a single value partition
+      hashKey: nameof<YtChannel>('phantomKey'), // we'll have a single value partition to enable sorting on createdAt
       rangeKey: nameof<YtChannel>('createdAt'),
       projectionType: 'ALL',
-      readCapacity: 1,
-      writeCapacity: 1,
     },
     {
       hashKey: nameof<YtChannel>('id'),
       name: 'id-index',
       projectionType: 'ALL',
-      readCapacity: 1,
-      writeCapacity: 1,
+    },
+    {
+      hashKey: nameof<YtChannel>('referrerChannelId'),
+      name: 'referrerChannelId-index',
+      projectionType: 'ALL',
     },
   ],
-  readCapacity: 1,
-  writeCapacity: 1,
+  billingMode: 'PAY_PER_REQUEST',
 })
 
 const videosTable = new aws.dynamodb.Table('videos', {
@@ -91,16 +90,23 @@ const videosTable = new aws.dynamodb.Table('videos', {
       type: 'S',
     },
     {
-      name: 'updatedAt',
+      name: 'publishedAt',
       type: 'S',
     },
   ],
   globalSecondaryIndexes: [
     {
       hashKey: nameof<YtVideo>('state'),
-      rangeKey: 'updatedAt',
-      name: 'state-updatedAt-index',
+      rangeKey: nameof<YtVideo>('publishedAt'),
+      name: 'state-publishedAt-index',
       projectionType: 'ALL',
+    },
+    {
+      hashKey: nameof<YtVideo>('channelId'),
+      rangeKey: nameof<YtVideo>('publishedAt'),
+      name: 'channelId-publishedAt-index',
+      projectionType: 'INCLUDE',
+      nonKeyAttributes: ['state'],
     },
   ],
   billingMode: 'PAY_PER_REQUEST',
@@ -114,12 +120,23 @@ const statsTable = new aws.dynamodb.Table('stats', {
     { name: nameof<Stats>('partition'), type: 'S' },
     { name: nameof<Stats>('date'), type: 'S' },
   ],
-  billingMode: 'PROVISIONED',
-  readCapacity: 1,
-  writeCapacity: 1,
+  billingMode: 'PAY_PER_REQUEST',
+})
+
+const whitelistChannelsTable = new aws.dynamodb.Table('whitelistChannels', {
+  name: `${resourcePrefix}whitelistChannels`,
+  hashKey: nameof<WhitelistChannel>('channelHandle'),
+  attributes: [
+    {
+      name: nameof<WhitelistChannel>('channelHandle'),
+      type: 'S',
+    },
+  ],
+  billingMode: 'PAY_PER_REQUEST',
 })
 
 export const usersTableArn = userTable.arn
 export const channelsTableArn = channelsTable.arn
 export const videosTableArn = videosTable.arn
 export const statsTableArn = statsTable.arn
+export const whitelistChannelsTableArn = whitelistChannelsTable.arn

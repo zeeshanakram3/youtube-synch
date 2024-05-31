@@ -1,5 +1,5 @@
 import { createType } from '@joystream/types'
-import axios, { AxiosError, AxiosRequestConfig } from 'axios'
+import axios from 'axios'
 import BN from 'bn.js'
 import FormData from 'form-data'
 import fs from 'fs'
@@ -20,30 +20,12 @@ export type VideoUploadResponse = {
 
 export class StorageNodeApi {
   private logger: Logger
-  private queryNodeApi: QueryNodeApi
 
-  public constructor(logging: LoggingService, queryNodeApi: QueryNodeApi) {
-    this.queryNodeApi = queryNodeApi
+  public constructor(logging: LoggingService, private queryNodeApi: QueryNodeApi) {
     this.logger = logging.createLogger('StorageNodeApi')
   }
 
-  // Adds timeout for the request which can additionally take into account response processing time.
-  private reqConfigWithTimeout(options: AxiosRequestConfig, timeoutMs: number): [AxiosRequestConfig, NodeJS.Timeout] {
-    const source = axios.CancelToken.source()
-    const timeout = setTimeout(() => {
-      this.logger.error(`Request timeout of ${timeoutMs}ms reached`, { timeoutMs })
-      source.cancel('Request timeout')
-    }, timeoutMs)
-    return [
-      {
-        ...options,
-        cancelToken: source.token,
-      },
-      timeout,
-    ]
-  }
-
-  async uploadVideo(video: YtVideo, videoFilePath: string): Promise<void> {
+  async uploadVideo(bagId: string, video: YtVideo, videoFilePath: string): Promise<void> {
     const assetsInput: AssetUploadInput[] = [
       {
         dataObjectId: createType('u64', new BN(video.joystreamVideo.assetIds[0])),
@@ -54,20 +36,22 @@ export class StorageNodeApi {
         file: await getThumbnailAsset(video.thumbnails),
       },
     ]
-    return this.upload(assetsInput)
+    return this.upload(bagId, assetsInput)
   }
 
-  private async upload(assets: AssetUploadInput[]) {
-    // Since both assets belong to the same bag, we can use any asset ID to get bag info
-    const bagId = await this.queryNodeApi.getStorageBagInfoForAsset(assets[0].dataObjectId.toString())
+  private async upload(bagId: string, assets: AssetUploadInput[]) {
+    // Get a random active storage node for given bag
     const operator = await this.getRandomActiveStorageNodeInfo(bagId)
     if (!operator) {
-      throw new StorageApiError(ExitCodes.StorageApi.NO_ACTIVE_STORAGE_PROVIDER, 'No active storage node found')
+      throw new StorageApiError(
+        ExitCodes.StorageApi.NO_ACTIVE_STORAGE_PROVIDER,
+        `No active storage node found for bagId: ${bagId}`
+      )
     }
 
     for (const { dataObjectId, file } of assets) {
       try {
-        this.logger.verbose('Uploading asset', { dataObjectId: dataObjectId.toString() })
+        this.logger.debug('Uploading asset', { dataObjectId: dataObjectId.toString() })
 
         const formData = new FormData()
         formData.append('file', file, 'video.mp4')
@@ -79,17 +63,28 @@ export class StorageNodeApi {
           },
           maxBodyLength: Infinity,
           maxContentLength: Infinity,
+          maxRedirects: 0,
           headers: {
             'content-type': 'multipart/form-data',
             ...formData.getHeaders(),
           },
         })
       } catch (error) {
-        const msg: string = (error as AxiosError).response?.data?.message
-        this.logger.error(msg)
-        if (msg.includes(`Data object ${dataObjectId} has already been accepted by storage node`)) {
-          // No need to throw an error, we can continue with the next asset
-          continue
+        // destroy the file stream
+        file.destroy()
+
+        if (axios.isAxiosError(error) && error.response) {
+          const storageNodeUrl = error.config?.url
+          const { status, data } = error.response
+
+          if (data?.message?.includes(`Data object ${dataObjectId} already exist`)) {
+            // No need to throw an error, we can continue with the next asset
+            continue
+          }
+
+          this.logger.error(`${storageNodeUrl} - errorCode: ${status}, msg: ${data?.message}`)
+
+          throw new Error(data?.message)
         }
 
         throw error
@@ -117,7 +112,7 @@ export class StorageNodeApi {
         }
       }
       if (i !== retryCount) {
-        this.logger.warn(
+        this.logger.debug(
           `No storage provider can serve the request yet, retrying in ${retryTime}s (${i + 1}/${retryCount})...`
         )
         await new Promise((resolve) => setTimeout(resolve, retryTime * 1000))
