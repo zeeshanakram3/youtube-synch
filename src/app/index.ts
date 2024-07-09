@@ -11,10 +11,10 @@ import { JoystreamClient } from '../services/runtime/client'
 import { ContentProcessingClient, ContentProcessingService } from '../services/syncProcessing'
 import { YoutubePollingService } from '../services/syncProcessing/YoutubePollingService'
 import { YoutubeApi } from '../services/youtube'
-import { Config, DisplaySafeConfig } from '../types'
+import { DisplaySafeConfig, ReadonlyConfig } from '../types'
 
 export class Service {
-  private config: Config
+  private config: ReadonlyConfig
   private logging: LoggingService
   private logger: Logger
   private youtubeApi: YoutubeApi
@@ -27,7 +27,7 @@ export class Service {
   private contentProcessingClient: ContentProcessingClient
   private isStopping = false
 
-  constructor(config: Config) {
+  constructor(config: ReadonlyConfig) {
     this.config = config
     this.logging = LoggingService.withAppConfig(config.logs)
     this.logger = this.logging.createLogger('Server')
@@ -95,7 +95,7 @@ export class Service {
     }
   }
 
-  private hideSecrets(config: Config): DisplaySafeConfig {
+  private hideSecrets(config: ReadonlyConfig): DisplaySafeConfig {
     const displaySafeConfig = {
       ...config,
       youtube: _.mapValues(config.youtube, () => '###SECRET###' as const),

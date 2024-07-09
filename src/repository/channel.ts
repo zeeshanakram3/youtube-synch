@@ -24,9 +24,6 @@ function createChannelModel(tablePrefix: ResourcePrefix) {
         hashKey: true,
       },
 
-      // user provided email
-      email: String,
-
       // ID of the corresponding Joystream Channel
       joystreamChannelId: {
         type: Number,
@@ -39,9 +36,6 @@ function createChannelModel(tablePrefix: ResourcePrefix) {
 
       // video category ID to be added to all synced videos
       videoCategoryId: String,
-
-      // default language of youtube channel
-      language: String,
 
       // language of corresponding Joystream channel
       joystreamChannelLanguageIso: String,
@@ -117,8 +111,6 @@ function createChannelModel(tablePrefix: ResourcePrefix) {
           default: String,
           medium: String,
           high: String,
-          maxRes: String,
-          standard: String,
         },
       },
 
@@ -130,8 +122,6 @@ function createChannelModel(tablePrefix: ResourcePrefix) {
 
       // user refresh token that will be used to get new access token after expiration
       userRefreshToken: String,
-
-      uploadsPlaylistId: String,
 
       // Should this channel be ingested for automated Youtube/Joystream syncing?
       shouldBeIngested: {

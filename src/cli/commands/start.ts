@@ -1,6 +1,6 @@
 import { flags } from '@oclif/command'
 import { Service } from '../../app'
-import { Config } from '../../types'
+import { ReadonlyConfig } from '../../types'
 import DefaultCommandBase from '../base/default'
 
 export default class StartYoutubeSyncService extends DefaultCommandBase {
@@ -18,7 +18,7 @@ export default class StartYoutubeSyncService extends DefaultCommandBase {
 
   async run(): Promise<void> {
     const { service } = this.parse(StartYoutubeSyncService).flags
-    const app = new Service(this.appConfig as Config)
+    const app = new Service(this.appConfig as ReadonlyConfig)
     await app.start(service)
   }
 

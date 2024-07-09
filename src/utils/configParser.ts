@@ -4,7 +4,7 @@ import _ from 'lodash'
 import path from 'path'
 import YAML from 'yaml'
 import configSchema, { byteSizeUnits } from '../schemas/config'
-import { Config } from '../types'
+import { ReadonlyConfig } from '../types'
 import { ValidationError, ValidationService } from './validation'
 
 export class ConfigParserService {
@@ -126,7 +126,7 @@ export class ConfigParserService {
     return String(packageJSON.version)
   }
 
-  public parse(): Config {
+  public parse(): ReadonlyConfig {
     const { configPath } = this
     let inputConfig: Record<string, unknown> = {}
     // Try to load config from file if exists
@@ -150,7 +150,7 @@ export class ConfigParserService {
     // Normalize values
     const storageLimit = this.parseByteSize(configJson.sync.limits?.storage || '0B')
 
-    const parsedConfig: Config = {
+    const parsedConfig: ReadonlyConfig = {
       ...configJson,
       version: this.getNodeVersion(),
       ...(configJson.sync.enable
@@ -165,7 +165,7 @@ export class ConfigParserService {
             },
           }
         : configJson.sync),
-    } as Config
+    } as ReadonlyConfig
 
     return parsedConfig
   }

@@ -12,7 +12,9 @@ export class UsersController {
   constructor(private youtubeApi: YoutubeApi, private dynamodbService: DynamodbService) {}
 
   @ApiOperation({
-    description: `fetches user's channel from the supplied google authorization code, and verifies if it satisfies YPP induction criteria`,
+    description:
+      `fetches user's channel from the supplied google authorization code or Youtube video URL` +
+      `(depending upon the authorization mode), and verifies if it satisfies YPP induction criteria`,
   })
   @ApiBody({ type: VerifyChannelRequest })
   @ApiResponse({ type: VerifyChannelResponse })

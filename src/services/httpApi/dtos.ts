@@ -12,7 +12,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator'
-import { Config, ReadonlyConfig } from '../../types'
+import { ReadonlyConfig } from '../../types'
 import { ExitCodes } from '../../types/errors'
 import {
   ChannelSyncStatus,
@@ -72,7 +72,7 @@ export class ChannelInductionRequirementsDto {
   })
   requirements: InductionRequirement[]
 
-  constructor(requirements: Config['creatorOnboardingRequirements']) {
+  constructor(requirements: ReadonlyConfig['creatorOnboardingRequirements']) {
     this.requirements = [
       {
         errorCode: ExitCodes.YoutubeApi.CHANNEL_CRITERIA_UNMET_SUBSCRIBERS,

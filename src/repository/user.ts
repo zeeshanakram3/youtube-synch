@@ -15,15 +15,6 @@ function createUserModel(tablePrefix: ResourcePrefix) {
         hashKey: true,
       },
 
-      // User email
-      email: String,
-
-      // User youtube username
-      youtubeUsername: String,
-
-      // User Google ID
-      googleId: String,
-
       // user authorization code
       authorizationCode: String,
 
@@ -35,15 +26,6 @@ function createUserModel(tablePrefix: ResourcePrefix) {
 
       // user refresh token that will be used to get new access token after expiration
       refreshToken: String,
-
-      // User avatar url
-      avatarUrl: String,
-
-      // Corresponding Joystream member ID/s for Youtube user created through `POST /membership` (if any)
-      joystreamMemberIds: {
-        type: Array,
-        schema: [Number],
-      },
     },
     {
       saveUnknown: false,

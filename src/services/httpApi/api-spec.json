@@ -240,7 +240,7 @@
     },
     "/channels/{joystreamChannelId}/category": {
       "put": {
-        "operationId": "ChannelsController_updateCategoryChannel",
+        "operationId": "ChannelsController_updateChannelCategory",
         "summary": "",
         "description": "Updates given channel's videos category. Note: only channel owner can update the status",
         "parameters": [
@@ -573,7 +573,7 @@
       "post": {
         "operationId": "UsersController_verifyUserAndChannel",
         "summary": "",
-        "description": "fetches user's channel from the supplied google authorization code, and verifies if it satisfies YPP induction criteria",
+        "description": "fetches user's channel from the supplied google authorization code or Youtube video URL(depending upon the authorization mode), and verifies if it satisfies YPP induction criteria",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -745,39 +745,6 @@
         },
         "tags": [
           "status"
-        ]
-      }
-    },
-    "/membership": {
-      "post": {
-        "operationId": "MembershipController_createMembership",
-        "summary": "",
-        "description": "Create Joystream's on-chain Membership for a verified YPP user. It will forward request\n       to Joystream faucet with an Authorization header to circumvent captcha verification by the faucet",
-        "parameters": [],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateMembershipRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "default": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateMembershipResponse"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "membership"
         ]
       }
     }
@@ -1107,7 +1074,7 @@
               "CHANNEL_NOT_FOUND",
               "VIDEO_NOT_FOUND",
               "VIDEO_PRIVACY_STATUS_NOT_UNLISTED",
-              "VIDEO_TITLE_NOT_MATCHING",
+              "VIDEO_TITLE_MISMATCH",
               "CHANNEL_ALREADY_REGISTERED",
               "CHANNEL_STATUS_SUSPENDED",
               "CHANNEL_CRITERIA_UNMET_SUBSCRIBERS",
@@ -1185,9 +1152,6 @@
       "VerifyChannelResponse": {
         "type": "object",
         "properties": {
-          "email": {
-            "type": "string"
-          },
           "id": {
             "type": "string"
           },
@@ -1200,9 +1164,6 @@
           "channelDescription": {
             "type": "string"
           },
-          "channelLanguage": {
-            "type": "string"
-          },
           "avatarUrl": {
             "type": "string"
           },
@@ -1211,12 +1172,10 @@
           }
         },
         "required": [
-          "email",
           "id",
           "channelHandle",
           "channelTitle",
           "channelDescription",
-          "channelLanguage",
           "avatarUrl",
           "bannerUrl"
         ]
@@ -1246,60 +1205,6 @@
           "syncStatus",
           "apiMode",
           "syncBacklog"
-        ]
-      },
-      "CreateMembershipRequest": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "authorizationCode": {
-            "type": "string"
-          },
-          "youtubeVideoUrl": {
-            "type": "string"
-          },
-          "account": {
-            "type": "string"
-          },
-          "handle": {
-            "type": "string"
-          },
-          "avatar": {
-            "type": "string"
-          },
-          "about": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "authorizationCode",
-          "youtubeVideoUrl",
-          "account",
-          "handle",
-          "avatar",
-          "about",
-          "name"
-        ]
-      },
-      "CreateMembershipResponse": {
-        "type": "object",
-        "properties": {
-          "memberId": {
-            "type": "number"
-          },
-          "handle": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "memberId",
-          "handle"
         ]
       }
     }
