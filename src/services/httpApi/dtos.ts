@@ -3,7 +3,6 @@ import { Type } from 'class-transformer'
 import {
   IsBoolean,
   IsDate,
-  IsEmail,
   IsEnum,
   IsNumber,
   IsOptional,
@@ -130,7 +129,6 @@ export class ChannelDto {
     this.joystreamChannelId = channel.joystreamChannelId
     this.referrerChannelId = channel.referrerChannelId
     this.videoCategoryId = channel.videoCategoryId
-    this.language = channel.language
     this.shouldBeIngested = channel.shouldBeIngested
     this.yppStatus = channel.yppStatus
     this.thumbnails = channel.thumbnails
@@ -190,9 +188,6 @@ export class VerifyChannelRequest {
 
 // Dto for verified Youtube channel response
 export class VerifyChannelResponse {
-  // Email of the verified user
-  @IsEmail() @ApiProperty() email: string
-
   // ID of the verified Youtube channel
   @IsString() @ApiProperty({ required: true }) id: string
 
@@ -204,9 +199,6 @@ export class VerifyChannelResponse {
 
   // Youtube Channel description
   @IsString() @ApiProperty({ required: true }) channelDescription: string
-
-  // Youtube Channel default language
-  @IsString() @ApiProperty() channelLanguage: string
 
   // Youtube Channel avatar URL
   @IsString() @ApiProperty({ required: true }) avatarUrl: string

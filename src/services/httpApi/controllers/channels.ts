@@ -20,7 +20,7 @@ import { DynamodbService } from '../../../repository'
 import { ReadonlyConfig } from '../../../types'
 import { YtChannel } from '../../../types/youtube'
 import { QueryNodeApi } from '../../query-node/api'
-import { ContentProcessingService } from '../../syncProcessing'
+import { ContentProcessingClient } from '../../syncProcessing'
 import { YoutubePollingService } from '../../syncProcessing/YoutubePollingService'
 import { YoutubeApi } from '../../youtube'
 import {
@@ -48,7 +48,7 @@ export class ChannelsController {
     private qnApi: QueryNodeApi,
     private dynamodbService: DynamodbService,
     private youtubePollingService: YoutubePollingService,
-    private contentProcessingService: ContentProcessingService
+    private contentProcessingClient: ContentProcessingClient
   ) {}
 
   @Post()
@@ -107,7 +107,7 @@ export class ChannelsController {
       let channel = await this.youtubeApi.operationalApi.getChannel(id)
       const existingChannel = await this.dynamodbService.repo.channels.get(channel.id)
 
-      const joystreamChannelLanguageIso = jsChannel.language?.iso
+      const joystreamChannelLanguageIso = jsChannel.language || undefined
 
       // If channel already exists in the DB (in `OptedOut` state), then we
       // associate most properties of existing channel record with the new
@@ -146,7 +146,7 @@ export class ChannelsController {
   async get(@Param('joystreamChannelId', ParseIntPipe) id: number) {
     try {
       const channel = await this.dynamodbService.channels.getByJoystreamId(id)
-      const syncStatus = await this.contentProcessingService.getJobsStatForChannel(channel.id)
+      const syncStatus = await this.contentProcessingClient.getJobsStatForChannel(channel.id)
 
       return new ChannelDto(channel, syncStatus)
     } catch (error) {

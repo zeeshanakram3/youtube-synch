@@ -1,7 +1,6 @@
-import { BadRequestException, Body, Controller, Inject, Post } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Post } from '@nestjs/common'
 import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger'
 import { DynamodbService } from '../../../repository'
-import { ReadonlyConfig } from '../../../types'
 import { ExitCodes, YoutubeApiError } from '../../../types/errors'
 import { YtChannel } from '../../../types/youtube'
 import { YoutubeApi } from '../../youtube'
@@ -10,11 +9,7 @@ import { VerifyChannelRequest, VerifyChannelResponse } from '../dtos'
 @Controller('users')
 @ApiTags('channels')
 export class UsersController {
-  constructor(
-    private youtubeApi: YoutubeApi,
-    private dynamodbService: DynamodbService,
-    @Inject('config') private config: ReadonlyConfig
-  ) {}
+  constructor(private youtubeApi: YoutubeApi, private dynamodbService: DynamodbService) {}
 
   @ApiOperation({
     description: `fetches user's channel from the supplied google authorization code, and verifies if it satisfies YPP induction criteria`,
@@ -60,22 +55,14 @@ export class UsersController {
         throw errors
       }
 
-      // Get existing user record from db (if any)
-      const existingUser = await this.dynamodbService.repo.users.get(user.id)
-
-      // save user & set joystreamMemberId if user already existed
-      await this.dynamodbService.users.save({ ...user, joystreamMemberId: existingUser?.joystreamMemberId })
-
       // return verified user
       return {
         id: user.id,
-        email: user.email || '',
         channelTitle: channel.title,
         channelDescription: channel.description,
         avatarUrl: channel.thumbnails.high,
         bannerUrl: channel.bannerImageUrl,
         channelHandle: channel.customUrl,
-        channelLanguage: channel.language,
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : error

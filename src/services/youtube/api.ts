@@ -94,12 +94,6 @@ class DataApiV3 implements IDataApiV3 {
       )
     }
 
-    if (!tokenInfo.email) {
-      throw new Error(
-        `User email not found in token info. Please add required 'userinfo.email' scope in user authorization request.`
-      )
-    }
-
     const channel = await this.getChannel({
       id: tokenInfo.sub,
       accessToken: tokenResponse.access_token,
@@ -108,11 +102,9 @@ class DataApiV3 implements IDataApiV3 {
 
     const user: YtUser = {
       id: channel.id,
-      email: tokenInfo.email,
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token,
       authorizationCode: code,
-      joystreamMemberId: undefined,
       youtubeVideoUrl: undefined,
       createdAt: new Date(),
     }
@@ -302,8 +294,6 @@ class DataApiV3 implements IDataApiV3 {
           },
           historicalVideoSyncedSize: 0,
           bannerImageUrl: channel.brandingSettings?.image?.bannerExternalUrl,
-          uploadsPlaylistId: channel.contentDetails?.relatedPlaylists?.uploads,
-          language: channel.snippet?.defaultLanguage,
           publishedAt: channel.snippet?.publishedAt,
           performUnauthorizedSync: false,
           shouldBeIngested: true,
